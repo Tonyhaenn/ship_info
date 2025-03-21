@@ -14,19 +14,24 @@ defmodule ShipInfo do
 
   @perplexity_api_key Dotenvy.env!("PERPLEXITY_API_KEY", :string)
 
-  @type ship_info :: %{vessel_name: String.t(), imo_number: String.t()}
+  @type ship_info :: %{
+    vessel_name: String.t(),
+    ship_type: String.t(),
+    ship_registration_country: String.t(),
+    ship_carrier_name: String.t(),
+    ship_carrier_code: String.t()
+  }
   @type enhanced_ship_info :: %{
           vessel_name: String.t(),
-          vessel_container_type_code: String.t(),
+          ship_type: String.t(),
           ship_registration_country: String.t(),
           ship_carrier_name: String.t(),
           ship_carrier_code: String.t(),
           imo_number: String.t(),
           country_of_construction: String.t(),
           shipbuilder_name: String.t(),
-          ship_type: String.t(),
-          ship_flag: String.t(),
           year_built: String.t(),
+          ship_flag: String.t(),
           lookup_status: String.t(),
           raw_response: String.t()
         }
@@ -65,6 +70,21 @@ defmodule ShipInfo do
   end
 
   @doc """
+  Transforms the the quantity unit into a container type code
+  """
+  @spec transform_quantity_unit_to_container_type_code(String.t()) :: String.t()
+  def transform_quantity_unit_to_container_type_code(quantity_unit) do
+    case quantity_unit do
+      "LBK" -> "Tanker / Chemical Tanker"
+      "DBK" -> "Dry Bulk"
+      "CBC" -> "Dry Bulk"
+      _ -> "Container"
+    end
+  end
+
+
+
+  @doc """
   Build a list of unique ship names and IMO numbers from the shipment data.
   Returns a stream of maps with :vessel_name and :imo_number keys.
   Empty or invalid entries are filtered out.
@@ -76,7 +96,7 @@ defmodule ShipInfo do
     |> Stream.map(fn row ->
       %{
         vessel_name: Map.get(row, "VESSEL NAME", ""),
-        container_type_code: Map.get(row, "QUANTITY UNIT", ""),
+        ship_type: transform_quantity_unit_to_container_type_code(Map.get(row, "QUANTITY UNIT", "")),
         ship_registration_country: Map.get(row, "SHIP REGISTERED IN", ""),
         ship_carrier_name: Map.get(row, "CARRIER NAME", ""),
         ship_carrier_code: Map.get(row, "CARRIER CODE", "")
@@ -107,9 +127,10 @@ defmodule ShipInfo do
     prompt = """
     I need to find the country of construction for the following ship:
     Vessel Name: #{vessel.vessel_name}
-    Vessel Container Type Code: #{vessel.container_type_code}
+    Vessel Type: #{vessel.ship_type}
     Ship Registration Country: #{vessel.ship_registration_country}
     Ship Carrier Name: #{vessel.ship_carrier_name}
+    Ship Carrier Code: #{vessel.ship_carrier_code}
 
     Please return the following information in JSON format according to this schema:
     {
@@ -119,11 +140,10 @@ defmodule ShipInfo do
         "imo_number": { "type": "string" },
         "country_of_construction": { "type": "string" },
         "shipbuilder_name": { "type": "string" },
-        "ship_type": { "type": "string" },
         "ship_flag": { "type": "string" },
         "year_built": { "type": "string" }
       },
-      "required": ["vessel_name", "imo_number", "country_of_construction", "shipbuilder_name", "ship_type", "ship_flag", "year_built"]
+      "required": ["vessel_name", "imo_number", "country_of_construction", "shipbuilder_name", "ship_flag", "year_built"]
     }
 
     You must ONLY return a JSON object with the above fields. No other text or comments.
@@ -160,22 +180,21 @@ defmodule ShipInfo do
         case JSON.decode(content) do
           {:ok, ship_info} ->
             # Check if we got an IMO but missing construction details
-            if ship_info["imo_number"] != "" &&
-               (ship_info["country_of_construction"] == "" || ship_info["shipbuilder_name"] == "") do
+            if ship_info["imo_number"] not in [nil, ""] && ship_info["country_of_construction"] in [nil, "", "Unknown"] do
               Process.sleep(@delay_between_requests)  # Add delay before second lookup
               second_lookup_result = lookup_with_imo(vessel.vessel_name, ship_info["imo_number"])
 
               # Merge results, preferring second lookup for construction details
               %{
                 vessel_name: vessel.vessel_name,
-                vessel_container_type_code: vessel.container_type_code,
+                ship_type: vessel.ship_type,
                 ship_registration_country: vessel.ship_registration_country,
                 ship_carrier_name: vessel.ship_carrier_name,
                 ship_carrier_code: vessel.ship_carrier_code,
                 imo_number: ship_info["imo_number"],
+                ship_flag: ship_info["ship_flag"],
                 country_of_construction: second_lookup_result["country_of_construction"] || ship_info["country_of_construction"],
                 shipbuilder_name: second_lookup_result["shipbuilder_name"] || ship_info["shipbuilder_name"],
-                ship_type: ship_info["ship_type"],
                 year_built: ship_info["year_built"],
                 lookup_status: "success_with_retry",
                 raw_response: ""
@@ -184,14 +203,14 @@ defmodule ShipInfo do
               # Use original successful result
               %{
                 vessel_name: vessel.vessel_name,
-                vessel_container_type_code: vessel.container_type_code,
+                ship_type: vessel.ship_type,
                 ship_registration_country: vessel.ship_registration_country,
                 ship_carrier_name: vessel.ship_carrier_name,
                 ship_carrier_code: vessel.ship_carrier_code,
                 imo_number: ship_info["imo_number"],
+                ship_flag: ship_info["ship_flag"],
                 country_of_construction: ship_info["country_of_construction"],
                 shipbuilder_name: ship_info["shipbuilder_name"],
-                ship_type: ship_info["ship_type"],
                 year_built: ship_info["year_built"],
                 lookup_status: "success",
                 raw_response: ""
@@ -200,14 +219,14 @@ defmodule ShipInfo do
           {:error, _} ->
             %{
               vessel_name: vessel.vessel_name,
-              vessel_container_type_code: vessel.container_type_code,
+              ship_type: vessel.ship_type,
               ship_registration_country: vessel.ship_registration_country,
               ship_carrier_name: vessel.ship_carrier_name,
               ship_carrier_code: vessel.ship_carrier_code,
               imo_number: "",
+              ship_flag: "",
               country_of_construction: "",
               shipbuilder_name: "",
-              ship_type: "",
               year_built: "",
               lookup_status: "fail",
               raw_response: content
@@ -217,14 +236,14 @@ defmodule ShipInfo do
       _ ->
         %{
           vessel_name: vessel.vessel_name,
-          vessel_container_type_code: vessel.container_type_code,
+          ship_type: vessel.ship_type,
           ship_registration_country: vessel.ship_registration_country,
           ship_carrier_name: vessel.ship_carrier_name,
           ship_carrier_code: vessel.ship_carrier_code,
           imo_number: "",
+          ship_flag: "",
           country_of_construction: "",
           shipbuilder_name: "",
-          ship_type: "",
           year_built: "",
           lookup_status: "api_error",
           raw_response: inspect(response.body)
@@ -297,14 +316,14 @@ defmodule ShipInfo do
   def write_enhanced_ship_info(enhanced_ship_stream, output_path) do
     headers = [
       "vessel_name",
-      "container_type_code",
+      "ship_type",
       "ship_registration_country",
       "ship_carrier_name",
       "ship_carrier_code",
       "imo_number",
+      "ship_flag",
       "country_of_construction",
       "shipbuilder_name",
-      "ship_type",
       "year_built",
       "lookup_status",
       "raw_response"
@@ -321,14 +340,14 @@ defmodule ShipInfo do
         [
           [
             ship.vessel_name,
-            ship.vessel_container_type_code,
+            ship.ship_type,
             ship.ship_registration_country,
             ship.ship_carrier_name,
             ship.ship_carrier_code,
             ship.imo_number,
+            ship.ship_flag,
             ship.country_of_construction,
             ship.shipbuilder_name,
-            ship.ship_type,
             ship.year_built,
             ship.lookup_status,
             ship.raw_response
@@ -349,7 +368,7 @@ end
 output_file = "enhanced_ship_info_#{Date.utc_today()}.csv"
 
 "us_imports_by_vessel_03182025.csv"
-|> ShipInfo.parse_ship_csv(50)
+|> ShipInfo.parse_ship_csv(:all)
 |> ShipInfo.get_unique_ship_names()
 |> ShipInfo.lookup_ship_country_of_construction()
 |> ShipInfo.write_enhanced_ship_info(output_file)
